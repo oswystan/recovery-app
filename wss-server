@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+/*
+ *********************************************************************************
+ *                     Copyright (C) 2018 wystan
+ *
+ *       filename: wss-server.js
+ *    description:
+ *        created: 2018-06-28 23:24:00
+ *         author: wystan
+ *
+ *********************************************************************************
+ */
+
+const SERVER_PORT = 8443;
+
+var logi = (...args)=>console.info('I|'+new Date().toISOString(), ...args);
+var logw = (...args)=>console.warn('W|'+new Date().toISOString(), ...args);
+var loge = (...args)=>console.error('E|'+new Date().toISOString(), ...args);
+var logd = (...args)=>console.log('D|'+new Date().toISOString(), ...args);
+
+var https = require('https');
+var fs = require('fs');
+var express = require('express');
+var app = express();
+app.use(express.static('static'));
+
+var credentials = {
+    key: fs.readFileSync(__dirname + '/keys/key.pem', 'utf8'),
+    cert: fs.readFileSync(__dirname + '/keys/cert.pem', 'utf8')
+};
+var server = https.createServer(credentials, app);
+var expressWs = require('express-ws')(app, server);
+server.listen(SERVER_PORT);
+logi("listen on", SERVER_PORT);
+
+app.ws('/app/v1.0.0', (ws, req)=>{
+    logi("new client");
+
+    ws.on('close', ()=>{
+        logi('=> close!');
+    });
+
+    ws.on('message', (msg)=>{
+        logi("=> get msg:", msg);
+    });
+});
+
+
+/************************************* END **************************************/
+
