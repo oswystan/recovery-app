@@ -4,6 +4,82 @@
     const logw = (...args)=>console.warn( "W|"+new Date().toISOString(), ...args);
     const loge = (...args)=>console.error("E|"+new Date().toISOString(), ...args);
 
+    class Emitter {
+        constructor() {
+            this._handlers = Object.create(null);
+        };
+
+        /**
+         * register the event with a handler
+         * @param  {string}     event
+         * @param  {function}   handler
+         * @return {NA}         NA
+         */
+        on(event, handler) {
+            this._handlers[event] = this._handlers[event] || [];
+            handler._once = false;
+            this._handlers[event].push(handler);
+        };
+
+        /**
+         * same as on but just run once when the given event fired
+         * @param  {string}     event
+         * @param  {function}   handler
+         * @return {NA}         NA
+         */
+        once(event, handler) {
+            this._handlers[event] = (this._handlers[event] || []);
+            handler._once = true;
+            this._handlers[event].push(handler);
+        };
+
+        /**
+         * turn off the event handler
+         * @param  {string}     event
+         * @param  {function}   handler
+         * @return {NA}         NA
+         */
+        off(event, handler) {
+            let handlers = this._handlers[event];
+            if (!handlers) return;
+            handlers.splice(handlers.indexOf(handler)>>>0, 1);
+        };
+
+        /**
+         * fire the event with arguments
+         * @param  {string}     event
+         * @return {NA}         NA
+         */
+        emit(event, ...args) {
+            let emitter = this;
+            (this._handlers[event] || []).slice().map(function(handler){
+                if(handler._once) {
+                    emitter.off(event, handler);
+                }
+                handler(...args);
+            });
+        };
+
+        /**
+         * fire the event with arguments asynchronously
+         * @param  {string}     event
+         * @return {NA}         NA
+         */
+        aemit(event, ...args) {
+            let emitter = this;
+            new Promise(function (resolve, reject) {
+                resolve();
+            }).then(function () {
+                emitter.emit(event, ...args);
+            });
+        };
+
+        check(event) {
+            return (this._handlers[event] && this._handlers[event].length > 0);
+        };
+    };
+
+
     class RetryTimer {
         constructor() {
             this.reset();
@@ -184,6 +260,7 @@
             this.lstream = [];
             this.rstream = [];
             this.startCallback = null;
+            this.emitter = new Emitter();
         }
         start(callback) {
             logi("===> app start");
@@ -203,13 +280,15 @@
             this.con = null;
         }
 
-        init() {
+        init(resolve, reject) {
             logi("===> app init");
-            this.id = Math.ceil(Math.random()*1000);
+            this.id = 0;
+            this._doInit_((resp)=>{this.id = resp.data.id; resolve && resolve(); }, reject);
         }
-        join() {
+        join(conf, resolve, reject) {
             logi("===> app join");
-            this.conf = Math.ceil(Math.random()*1000);
+            this.conf = conf;
+            this._doJoin_(conf, resolve, reject);
         }
         publish(sid) {
             logi("===> app publish");
@@ -268,13 +347,38 @@
             this.con.connect(this.url);
         }
         _onmessage_(msg) {
-            logd("got", msg.data);
+            // logd("got", msg.data);
             this.ping.pong();
+            let resp = JSON.parse(msg.data);
+            this.emitter.emit(resp.command, resp);
         }
         _pingTimeout_() {
             this.ping.stop();
             this.con.close();
             this.con.connect(this.url);
+        }
+
+        _respHandler_(resolve, reject, resp) {
+            if (resp.error != 0) {
+                reject && reject(resp);
+            } else {
+                resolve && resolve(resp);
+            }
+        }
+        _doInit_(resolve, reject) {
+            let req = {
+                command: "init"
+            };
+            this.con.send(JSON.stringify(req));
+            this.emitter.once("init", this._respHandler_.bind(this, resolve, reject));
+        }
+        _doJoin_(id, resolve, reject) {
+            let req = {
+                command: "join",
+                id: id
+            };
+            this.con.send(JSON.stringify(req));
+            this.emitter.once("join", this._respHandler_.bind(this, resolve, reject));
         }
     };
 
@@ -282,9 +386,14 @@
     let url = "wss://localhost:8443/app/v1.0.0";
     let app = new App(url);
     app.start(function(){
-        app.init();
-        app.join();
-        app.publish(1);
-        app.subscribe(20);
+        app.init(join);
     });
+
+    function join() {
+        app.join("conf", join_succ);
+    }
+
+    function join_succ() {
+        logd("join_succ");
+    }
 })();
