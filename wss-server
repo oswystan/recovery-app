@@ -40,8 +40,104 @@ app.ws('/app/v1.0.0', (ws, req)=>{
         logi('=> close!');
     });
 
+    function randomID() {
+        return Math.ceil(Math.random()*1000000);
+    }
+
+    function handlePing() {
+        let resp = {
+            command: "ping",
+            error: 0
+        };
+        ws.send(JSON.stringify(resp));
+    }
+
+    function handleInit(msg) {
+        let resp = {
+            command: "init",
+            error: 0,
+            data: {
+                id : randomID()
+            }
+        }
+        ws.send(JSON.stringify(resp));
+    }
+    function handleJoin(msg) {
+        let resp = {
+            command: "join",
+            error: 0,
+        };
+        ws.send(JSON.stringify(resp));
+    }
+    function handleLeave(msg) {
+        let resp = {
+            command: "leave",
+            error: 0,
+        };
+        ws.send(JSON.stringify(resp));
+    }
+    function handlePublish(msg) {
+        let resp = {
+            command: "publish",
+            error: 0,
+            data : {
+                sid: msg.sid,
+                sdp: "answer sdp"
+            }
+        };
+        ws.send(JSON.stringify(resp));
+    }
+    function handleSubscribe(msg) {
+        let resp = {
+            command: "subscribe",
+            error: 0,
+            data : {
+                sid: msg.sid,
+                sdp: "answer sdp"
+            }
+        };
+        ws.send(JSON.stringify(resp));
+    }
+    function handleUnPublish(msg) {
+        let resp = {
+            command: "unpublish",
+            error: 0,
+            data : {
+                sid: msg.sid
+            }
+        };
+        ws.send(JSON.stringify(resp));
+    }
+    function handleUnSubscribe(msg) {
+        let resp = {
+            command: "unsubscribe",
+            error: 0,
+            data : {
+                sid: msg.sid
+            }
+        };
+        ws.send(JSON.stringify(resp));
+    }
+
+    let handlers = [
+        {type : "ping",        handler: handlePing},
+        {type : "init",        handler: handleInit},
+        {type : "join",        handler: handleJoin},
+        {type : "leave",       handler: handleLeave},
+        {type : "publish",     handler: handlePublish},
+        {type : "subscribe",   handler: handleSubscribe},
+        {type : "unpublish",   handler: handleUnPublish},
+        {type : "unsubscribe", handler: handleUnSubscribe},
+    ];
+
     ws.on('message', (msg)=>{
         logi("=> get msg:", msg);
+        let cmd = JSON.parse(msg);
+        for (let i = 0; i < handlers.length; i++) {
+            if (handlers[i].type === cmd.command) {
+                handlers[i].handler(cmd);
+            }
+        }
     });
 });
 
