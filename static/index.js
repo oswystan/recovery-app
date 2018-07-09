@@ -1,8 +1,13 @@
 (function(){
-    const logd = (...args)=>console.debug(  "D|"+new Date().toISOString(), ...args);
+    const logd = (...args)=>console.debug("D|"+new Date().toISOString(), ...args);
     const logi = (...args)=>console.info( "I|"+new Date().toISOString(), ...args);
     const logw = (...args)=>console.warn( "W|"+new Date().toISOString(), ...args);
     const loge = (...args)=>console.error("E|"+new Date().toISOString(), ...args);
+
+
+    function randomID() {
+        return Math.floor(Math.random()*4294967296);
+    }
 
     class Emitter {
         constructor() {
@@ -255,6 +260,105 @@
         }
     };
 
+    const CREATED   = 0;
+    const ERROR     = 1;
+    const COMPLETED = 2;
+    const CLOSED    = 3;
+
+    const LOCAL     = 0;
+    const REMOTE    = 1;
+
+    const CMD_PUB   = 1;
+    const CMD_SUB   = 2;
+    const CMD_UNPUB = 3;
+    const CMD_UNSUB = 4;
+
+    class StreamOperator {
+        constructor(app) {
+            this.app = app;
+            this.working = null;
+            this.timer = new RetryTimer();
+            this.timerID = 0;
+        }
+        trigger() {
+            if (this.working) {
+                return;
+            }
+            let app = this.app;
+            if (app.streamCmds.length === 0) {
+                return;
+            }
+            this.working = app.streamCmds[0];
+            app.streamCmds.splice(0, 1);
+            this._doWorking_();
+        }
+        stop() {
+            if (this.timerID) {
+                clearTimeout(this.timerID);
+            }
+            this.timerID = 0;
+            let app = this.app;
+            app.streamCmds.splice(0, 0, this.working);
+            this.working = null;
+        }
+
+        _doWorking_() {
+            let cmd = this.working;
+            switch(cmd.type) {
+                case CMD_PUB:   { this._doPublish_(); break; }
+                case CMD_SUB:   { this._doSubscribe_(); break; }
+                case CMD_UNPUB: { this._doUnPublish_(); break; }
+                case CMD_UNSUB: { this._doUnSubscribe_(); break; }
+                default:
+                {
+                    loge("invalid command", cmd.type);
+                    this.trigger();
+                    break;
+                }
+            }
+        }
+
+        _doPublish_() {
+            let app = this.app;
+            let cmd = this.working;
+            let operator = this;
+            function succ(resp) {
+                logi("publish succ", cmd.stream.id);
+                app.emitter.aemit("stream-published", cmd.stream);
+            }
+            function fail(resp) {
+                loge("fail to publish", cmd.stream.id);
+                operator.timerID = setTimeout(operator._doPublish_.bind(operator), operator.timer.retryMS());
+            }
+            app._doPublish_(cmd.stream, succ, cmd.reject);
+        }
+        _doUnPublish_() {}
+        _doSubscribe_() {}
+        _doUnSubscribe_() {}
+    };
+
+
+    class Stream {
+        constructor(id, type = LOCAL) {
+            this.type   = type;
+            this.id     = id;
+            this.status = CREATED;
+        }
+        equal(stream) {
+            return (stream instanceof Stream) &&
+                stream.type === this.type &&
+                stream.id === this.id;
+        }
+    };
+    class StreamCommand {
+        constructor(type, stream, resolve, reject) {
+            this.type = type;
+            this.stream = stream;
+            this.resolve = resolve;
+            this.reject = reject;
+        }
+    };
+
     class StateBase {
         constructor(app) {
             this.app = app;
@@ -265,8 +369,24 @@
         join(conf, resolve, reject) {
             reject && reject();
         }
-        leave() {
+        leave(resolve, reject) {
             reject && reject();
+        }
+        publish(stream, resolve, reject) {
+            let app = this.app;
+            app.streamCmds.push(new StreamCommand(CMD_PUB, stream, resolve, reject));
+        }
+        subscribe(stream, resolve, reject) {
+            let app = this.app;
+            app.streamCmds.push(new StreamCommand(CMD_SUB, stream, resolve, reject));
+        }
+        unpublish(stream, resolve, reject) {
+            let app = this.app;
+            app.streamCmds.push(new StreamCommand(CMD_UNPUB, stream, resolve, reject));
+        }
+        unsubscribe(stream, resolve, reject) {
+            let app = this.app;
+            app.streamCmds.push(new StreamCommand(CMD_UNSUB, stream, resolve, reject));
         }
         close() {
             loge("call from state base");
@@ -278,7 +398,7 @@
             loge("stop from base");
         }
     };
-    class StateNormal extends StateBase{
+    class StateNormal extends StateBase {
         constructor(app) {
             super(app);
         }
@@ -328,6 +448,22 @@
                 reject && reject();
             }
             app._doLeave_(resolve, fail);
+        }
+        publish(stream, resolve, reject) {
+            super.publish(stream, resolve, reject);
+            app.operator.trigger();
+        }
+        subscribe(stream, resolve, reject) {
+            super.subscribe(stream, resolve, reject);
+            app.operator.trigger();
+        }
+        unpublish(stream, resolve, reject) {
+            super.unpublish(stream, resolve, reject);
+            app.operator.trigger();
+        }
+        unsubscribe(stream, resolve, reject) {
+            super.unsubscribe(stream, resolve, reject);
+            app.operator.trigger();
         }
 
         stop() {
@@ -399,16 +535,18 @@
 
     class App {
         constructor(url) {
-            this.con  = null;
-            this.ping = null;
-            this.url  = url;
-            this.id   = -1;
-            this.conf = null;
-            this.lstream = [];
-            this.rstream = [];
+            this.con           = null;
+            this.ping          = null;
+            this.url           = url;
+            this.id            = -1;
+            this.conf          = null;
+            this.lstream       = [];
+            this.rstream       = [];
             this.startCallback = null;
-            this.emitter = new Emitter();
-            this.state = new StateNormal(this);
+            this.emitter       = new Emitter();
+            this.state         = new StateNormal(this);
+            this.streamCmds    = [];
+            this.operator      = new StreamOperator(this);
         }
 
         init(resolve, reject) {
@@ -419,27 +557,21 @@
             logi("===> app join");
             this.state.join(conf, resolve, reject);
         }
-        publish(sid) {
+        publish(stream, reject) {
             logi("===> app publish");
-            this.lstream.push(sid);
+            this.state.publish(stream, null, reject);
         }
-        subscribe(sid) {
+        subscribe(stream, reject) {
             logi("===> app subscribe");
-            this.rstream.push(sid);
+            this.state.subscribe(stream, null, reject);
         }
-        unpublish(sid) {
+        unpublish(stream, reject) {
             logi("===> app unpublish");
-            let idx = this.lstream.indexOf(sid);
-            if (idx >= 0) {
-                this.lstream.splice(idx, 1);
-            }
+            this.state.unpublish(stream, null, reject);
         }
-        unsubscribe(sid) {
+        unsubscribe(stream, reject) {
             logi("===> app unsubscribe");
-            let idx = this.lstream.indexOf(sid);
-            if (idx >= 0) {
-                this.rstream.splice(idx, 1);
-            }
+            this.state.unsubscribe(stream, null, reject);
         }
         leave(resolve, reject) {
             logi("===> app leave");
@@ -567,14 +699,11 @@
         app.init(join);
 
         function join() {
-            app.join("conf");
+            app.join("conf", publish);
         }
 
-        function leave() {
-            app.leave(leave_succ);
-        }
-        function leave_succ() {
-            logd("leave succ");
+        function publish() {
+            app.publish(new Stream(randomID(), LOCAL));
         }
     }
     function stopApp() {
