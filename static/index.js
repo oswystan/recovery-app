@@ -1,5 +1,5 @@
 (function(){
-    const logd = (...args)=>console.log(  "D|"+new Date().toISOString(), ...args);
+    const logd = (...args)=>console.debug(  "D|"+new Date().toISOString(), ...args);
     const logi = (...args)=>console.info( "I|"+new Date().toISOString(), ...args);
     const logw = (...args)=>console.warn( "W|"+new Date().toISOString(), ...args);
     const loge = (...args)=>console.error("E|"+new Date().toISOString(), ...args);
@@ -42,7 +42,11 @@
         off(event, handler) {
             let handlers = this._handlers[event];
             if (!handlers) return;
-            handlers.splice(handlers.indexOf(handler)>>>0, 1);
+            if (handler) {
+                handlers.splice(handlers.indexOf(handler)>>>0, 1);
+            } else {
+                this._handlers[event] = [];
+            }
         };
 
         /**
@@ -128,6 +132,7 @@
             logi("closing socket");
             if (this.ws) {
                 this.ws.onclose = null;
+                this.ws.onmessage = null;
                 this.ws.close();
             }
             if (this.connectTimerID > 0) {
@@ -250,45 +255,168 @@
         }
     };
 
+    class StateBase {
+        constructor(app) {
+            this.app = app;
+        }
+        init(resolve, reject) {
+            reject && reject();
+        }
+        join(conf, resolve, reject) {
+            reject && reject();
+        }
+        leave() {
+            reject && reject();
+        }
+        close() {
+            loge("call from state base");
+        }
+        recover() {
+            loge("recover from base");
+        }
+        stop() {
+            loge("stop from base");
+        }
+    };
+    class StateNormal extends StateBase{
+        constructor(app) {
+            super(app);
+        }
+        init(resolve, reject) {
+            let app = this.app;
+            if (app.id >= 0) {
+                reject && reject();
+                return;
+            }
+            function succ(resp) {
+                app.id = resp.data.id;
+                resolve && resolve();
+            }
+            function fail(resp) {
+                app.id = -1;
+                reject && reject();
+            }
+            app._start_(()=>{
+                app.id = 0;
+                app._doInit_(succ, fail);
+            });
+        }
+        join(conf, resolve, reject) {
+            let app = this.app;
+            if (app.conf) {
+                reject && reject();
+                return;
+            }
+            app.conf = conf;
+            function fail(resp) {
+                loge("fail to join", resp);
+                app.conf = null;
+                reject && reject();
+            }
+            app._doJoin_(conf, resolve, fail);
+        }
+        leave(resolve, reject) {
+            let app = this.app;
+            if (!app.conf) {
+                reject && reject();
+                return;
+            }
+            function fail() {
+                loge("fail to leave");
+                app.conf = null;
+                reject && reject();
+            }
+            app._doLeave_(resolve, fail);
+        }
+
+        stop() {
+            logd("stop normal");
+        }
+    };
+    class StateRecovery extends StateBase {
+        constructor(app) {
+            super(app);
+            this.timer = new RetryTimer();
+            this.timerID = 0;
+        }
+
+        recover() {
+            logi("start to recover");
+            this.timer.reset();
+            let app = this.app;
+            if (app.id >= 0) {
+                this._recoverInit_();
+            } else {
+                app.state = new StateNormal(app);
+            }
+        }
+        stop() {
+            logd("recover stop");
+            clearTimeout(this.timerID);
+            this.timerID = 0;
+        }
+
+        _recoverInit_() {
+            let app = this.app;
+            let state = this;
+            function succ(resp) {
+                state.timer.reset();
+                app.id = resp.data.id;
+                if (app.conf) {
+                    state._recoverJoin_();
+                } else {
+                    state._exit_();
+                }
+            }
+            function fail(resp) {
+                loge("fail to do init: ", resp.error);
+                state.timerID = setTimeout(state._recoverInit_.bind(state), state.timer.retryMS());
+            }
+            app._doInit_(succ, fail);
+        }
+        _recoverJoin_() {
+            let app = this.app;
+            let state = this;
+            function succ(resp) {
+                state.timer.reset();
+                state._exit_();
+            }
+            function fail(resp) {
+                loge("fail to do join: ", resp.error);
+                state.timerID = setTimeout(state._recoverJoin_.bind(state), state.timer.retryMS());
+            }
+            app._doJoin_(app.conf, succ, fail);
+        }
+        _exit_() {
+            logi("recover exit");
+            let app = this.app;
+            app.state = new StateNormal(app);
+            clearTimeout(this.timerID);
+            this.timerID = 0;
+        }
+    };
+
     class App {
         constructor(url) {
             this.con  = null;
             this.ping = null;
             this.url  = url;
-            this.id   = 0;
-            this.conf = 0;
+            this.id   = -1;
+            this.conf = null;
             this.lstream = [];
             this.rstream = [];
             this.startCallback = null;
             this.emitter = new Emitter();
-        }
-        start(callback) {
-            logi("===> app start");
-            this.con = new StableWebSocket();
-            this.ping = new PingService(2000, 3);
-            this.con.onopen = this._onopen_.bind(this);
-            this.con.onclose = this._onclose_.bind(this);
-            this.con.onmessage = this._onmessage_.bind(this);
-            this.con.connect(this.url);
-            this.startCallback = callback;
-        }
-        stop() {
-            logi("===> app stop");
-            this.ping.stop();
-            this.con.close();
-            this.ping = null;
-            this.con = null;
+            this.state = new StateNormal(this);
         }
 
         init(resolve, reject) {
             logi("===> app init");
-            this.id = 0;
-            this._doInit_((resp)=>{this.id = resp.data.id; resolve && resolve(); }, reject);
+            this.state.init(resolve, reject);
         }
         join(conf, resolve, reject) {
             logi("===> app join");
-            this.conf = conf;
-            this._doJoin_(conf, resolve, reject);
+            this.state.join(conf, resolve, reject);
         }
         publish(sid) {
             logi("===> app publish");
@@ -312,29 +440,36 @@
                 this.rstream.splice(idx, 1);
             }
         }
-        leave() {
+        leave(resolve, reject) {
             logi("===> app leave");
-            this.conf = 0;
+            this.state.leave(resolve, reject);
         }
         close() {
             logi("===> app close");
-            this.id = 0;
+            this.id = -1;
+            this.ping.stop();
+            this.con.close();
+            this.ping = null;
+            this.con = null;
+        }
+
+
+        _start_(callback) {
+            logi("===> app start");
+            this.con = new StableWebSocket();
+            this.ping = new PingService(2000, 3);
+            this.con.onopen = this._onopen_.bind(this);
+            this.con.onclose = this._onclose_.bind(this);
+            this.con.onmessage = this._onmessage_.bind(this);
+            this.con.connect(this.url);
+            this.startCallback = callback;
         }
 
         _onopen_() {
             logi("===> server connected");
             this.ping.start(this.con, this._pingTimeout_.bind(this));
-            if (this.id != 0) {
-                logd("need to init");
-            }
-            if (this.conf != 0) {
-                logd("need to join");
-            }
-            if (this.lstream.length != 0) {
-                logd("need to publish:", ...this.lstream);
-            }
-            if(this.rstream.length != 0) {
-                logd("need to subscribe:", ...this.rstream);
+            if (this.id >= 0) {
+                this.state.recover();
             }
             if (this.startCallback) {
                 this.startCallback();
@@ -344,6 +479,8 @@
         _onclose_(e) {
             logw("===> server disconnected");
             this.ping.stop();
+            this.state.stop();
+            this.state = new StateRecovery(this);
             this.con.connect(this.url);
         }
         _onmessage_(msg) {
@@ -354,7 +491,9 @@
         }
         _pingTimeout_() {
             this.ping.stop();
+            this.state.stop();
             this.con.close();
+            this.state = new StateRecovery(this);
             this.con.connect(this.url);
         }
 
@@ -366,34 +505,76 @@
             }
         }
         _doInit_(resolve, reject) {
+            logd("_doInit_");
             let req = {
                 command: "init"
             };
             this.con.send(JSON.stringify(req));
+            this.emitter.off("init");
             this.emitter.once("init", this._respHandler_.bind(this, resolve, reject));
         }
         _doJoin_(id, resolve, reject) {
+            logd("_doJoin_");
             let req = {
                 command: "join",
                 id: id
             };
             this.con.send(JSON.stringify(req));
+            this.emitter.off("join");
             this.emitter.once("join", this._respHandler_.bind(this, resolve, reject));
+        }
+        _doLeave_(resolve, reject) {
+            let req = {command: "leave"};
+            this.emitter.off("leave");
+            this.emitter.once("leave", this._respHandler_.bind(this, resolve, reject));
+            this.con.send(JSON.stringify(req));
+        }
+        _doPublish_(stream, resolve, reject) {
+            let req = {command: "publish", stream: stream};
+            this.emitter.off("publish");
+            this.emitter.once("publish", this._respHandler_.bind(this, resolve, reject));
+            this.con.send(JSON.stringify(req));
+        }
+        _doSubscribe_(stream, resolve, reject) {
+            let req = {command: "subscribe", stream: stream};
+            this.emitter.off("subscribe");
+            this.emitter.once("subscribe", this._respHandler_.bind(this, resolve, reject));
+            this.con.send(JSON.stringify(req));
+        }
+        _doUnPublish_(stream, resolve, reject) {
+            let req = {command: "unpublish", stream: stream};
+            this.emitter.off("unpublish");
+            this.emitter.once("unpublish", this._respHandler_.bind(this, resolve, reject));
+            this.con.send(JSON.stringify(req));
+        }
+        _doUnSubscribe_(stream, resolve, reject) {
+            let req = {command: "unsubscribe", stream: stream};
+            this.emitter.off("unsubscribe");
+            this.emitter.once("unsubscribe", this._respHandler_.bind(this, resolve, reject));
+            this.con.send(JSON.stringify(req));
         }
     };
 
     // let url = "ws://10.2.20.98:8090/app/v1.0.0";
-    let url = "wss://localhost:8443/app/v1.0.0";
-    let app = new App(url);
-    app.start(function(){
+    let url = "wss://10.33.11.31:8443/app/v1.0.0";
+
+
+    function startApp() {
+        let app = new App(url);
+
         app.init(join);
-    });
 
-    function join() {
-        app.join("conf", join_succ);
+        function join() {
+            app.join("conf");
+        }
+
+        function leave() {
+            app.leave(leave_succ);
+        }
+        function leave_succ() {
+            logd("leave succ");
+        }
     }
 
-    function join_succ() {
-        logd("join_succ");
-    }
+    document.getElementById('start').onclick = startApp;
 })();

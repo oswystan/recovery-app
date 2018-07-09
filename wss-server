@@ -33,11 +33,15 @@ var expressWs = require('express-ws')(app, server);
 server.listen(SERVER_PORT);
 logi("listen on", SERVER_PORT);
 
+let initError = [0, 11, 22, 33, 44, 55, 0];
+let WSID = 1;
+
 app.ws('/app/v1.0.0', (ws, req)=>{
-    logi("new client");
+    ws.id = WSID++;
+    logi("new client", ws.id);
 
     ws.on('close', ()=>{
-        logi('=> close!');
+        logi('=> close!', ws.id);
     });
 
     function randomID() {
@@ -53,9 +57,14 @@ app.ws('/app/v1.0.0', (ws, req)=>{
     }
 
     function handleInit(msg) {
+        let error = initError.length == 0 ? 0 : initError[0];
+        if (initError.length > 0 ) {
+            initError.splice(0, 1);
+        }
+        logd("error: ", error);
         let resp = {
             command: "init",
-            error: 0,
+            error: error,
             data: {
                 id : randomID()
             }
@@ -131,8 +140,10 @@ app.ws('/app/v1.0.0', (ws, req)=>{
     ];
 
     ws.on('message', (msg)=>{
-        logi("=> get msg:", msg);
         let cmd = JSON.parse(msg);
+        if (cmd.command !== "ping") {
+            logd("=> msg:", msg, ws.id);
+        }
         for (let i = 0; i < handlers.length; i++) {
             if (handlers[i].type === cmd.command) {
                 handlers[i].handler(cmd);
