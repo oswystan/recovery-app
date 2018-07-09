@@ -34,6 +34,7 @@ server.listen(SERVER_PORT);
 logi("listen on", SERVER_PORT);
 
 let initError = [0, 11, 22, 33, 44, 55, 0];
+let joinError = [0, 11, 22, 33, 44, 55, 0];
 let WSID = 1;
 
 app.ws('/app/v1.0.0', (ws, req)=>{
@@ -72,9 +73,14 @@ app.ws('/app/v1.0.0', (ws, req)=>{
         ws.send(JSON.stringify(resp));
     }
     function handleJoin(msg) {
+        let error = joinError.length == 0 ? 0 : joinError[0];
+        if (joinError.length > 0 ) {
+            joinError.splice(0, 1);
+        }
+        logd("error: ", error);
         let resp = {
             command: "join",
-            error: 0,
+            error: error,
         };
         ws.send(JSON.stringify(resp));
     }

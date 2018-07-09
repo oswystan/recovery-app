@@ -293,6 +293,7 @@
                 resolve && resolve();
             }
             function fail(resp) {
+                loge("fail to init", resp);
                 app.id = -1;
                 reject && reject();
             }
@@ -448,6 +449,7 @@
             logi("===> app close");
             this.id = -1;
             this.ping.stop();
+            this.state.stop();
             this.con.close();
             this.ping = null;
             this.con = null;
@@ -559,9 +561,9 @@
     let url = "wss://10.33.11.31:8443/app/v1.0.0";
 
 
+    let app = null;
     function startApp() {
-        let app = new App(url);
-
+        app = new App(url);
         app.init(join);
 
         function join() {
@@ -575,6 +577,10 @@
             logd("leave succ");
         }
     }
+    function stopApp() {
+        app.close();
+    }
 
     document.getElementById('start').onclick = startApp;
+    document.getElementById('stop').onclick = stopApp;
 })();
