@@ -123,7 +123,7 @@
         }
     };
 
-    class StableWebSocket {
+    class AwesomeWebSocket {
         constructor() {
             this.url                = null;
             this.onmessage          = null;
@@ -150,7 +150,6 @@
             this.retryTimerID   = clearTimer(this.retryTimerID);
         }
         connect(url) {
-            logi('connecting:', url);
             this.url = url;
             this.timer.reset();
 
@@ -168,13 +167,14 @@
         _connect() {
             try {
                 this.lastConnectTS = Date.now();
-                let ws     = new WebSocket(url);
+                logi('connecting:', this.url);
+                let ws     = new WebSocket(this.url);
                 ws.onopen  = this._onopen.bind(this);
                 ws.onclose = this._onclose.bind(this);
                 ws.onerror = this._onerror.bind(this);
                 this.ws    = ws;
                 this.connectTimerID = setTimeout(()=>{
-                    loge("connect", url, "timeout!");
+                    loge("*** *** CONNECT TIMEOUT *** ***");
                     ws.close();
                 }, this.kConnectIntervalMS);
             } catch (e) {
@@ -772,7 +772,7 @@
 
         _start_(callback) {
             logi("===> app start");
-            this.con = new StableWebSocket();
+            this.con = new AwesomeWebSocket();
             this.ping = new PingService(2000, 3);
             this.con.onopen = this._onopen_.bind(this);
             this.con.onclose = this._onclose_.bind(this);
@@ -898,8 +898,8 @@
         }
     };
 
-    // let url = "ws://10.2.20.98:8090/app/v1.0.0";
-    let url = "wss://10.33.11.31:8443/app/v1.0.0";
+    // let url = "wss://10.33.11.31:8443/app/v1.0.0";
+    let url = "wss://1.1.1.1:8443/app/v1.0.0";
 
     let app = null;
     function startApp() {

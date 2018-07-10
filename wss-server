@@ -33,8 +33,8 @@ var expressWs = require('express-ws')(app, server);
 server.listen(SERVER_PORT);
 logi("listen on", SERVER_PORT);
 
-let initError = [0];
-let joinError = [0];
+let initError = [0,1,2,0,1,0];
+let joinError = [0,1,2,0,1,0];
 let publishError = [1,1,0,2,4,0,2,3,0];
 let subscribeError = [1,1,0,2,4,0,2,3,0];
 let WSID = 1;
