@@ -4,12 +4,14 @@
     const logw = (...args)=>console.warn( "W|"+new Date().toISOString(), ...args);
     const loge = (...args)=>console.error("E|"+new Date().toISOString(), ...args);
 
-
+    function random(max) {
+        return Math.floor(Math.random()*max);
+    }
     function randomU32() {
-        return Math.floor(Math.random()*4294967296);
+        return random(4294967296);
     }
     function randomU16() {
-        return Math.floor(Math.random()*65536);
+        return random(65536);
     }
     const randomID = randomU32;
     function streamExisted(streams, stream) {
@@ -95,6 +97,33 @@
         };
     };
 
+    class RandomTimer {
+        constructor() {
+            this.reset();
+        }
+        next() {
+            let ret = this.val;
+            this.val += (this.inc + this.rand());
+            this.val = Math.min(this.val, this.max);
+            return ret;
+        }
+        rand() {
+            return Math.floor(Math.random()*1000);
+        }
+        reset() {
+            this.base = 1000;
+            this.inc  = 1000;
+            this.max  = 10000;
+            this.val  = this.base + this.rand();
+        }
+    };
+
+    function clearTimer(timerID) {
+        if (timerID > 0) {
+            clearTimeout(timerID);
+        }
+        return 0;
+    }
 
     class RetryTimer {
         constructor() {
@@ -136,9 +165,7 @@
             this.lastConnectTS  = 0;
         }
         send(data) {
-            if (this.ws) {
-                this.ws.send(data);
-            }
+            this.ws && this.ws.send(data);
         }
         close() {
             logi("closing socket");
@@ -147,14 +174,8 @@
                 this.ws.onmessage = null;
                 this.ws.close();
             }
-            if (this.connectTimerID > 0) {
-                clearTimeout(this.connectTimerID);
-                this.connectTimerID = 0;
-            }
-            if (this.retryTimerID > 0) {
-                clearTimeout(this.retryTimerID);
-                this.retryTimerID = 0;
-            }
+            this.connectTimerID = clearTimer(this.connectTimerID);
+            this.retryTimerID   = clearTimer(this.retryTimerID);
         }
         connect(url) {
             logi('connecting:', url);
@@ -201,7 +222,7 @@
         }
         _onopen() {
             this.timer.reset();
-            clearTimeout(this.connectTimerID);
+            this.connectTimerID = clearTimer(this.connectTimerID);
             let ws       = this.ws;
             ws.onclose   = this.onclose;
             ws.onmessage = this.onmessage;
@@ -212,7 +233,7 @@
         _onclose(e) {
             logw("socket closed", e.code);
             this.ws = null;
-            clearTimeout(this.connectTimerID);
+            this.connectTimerID = clearTimer(this.connectTimerID);
             this._retry();
         }
         _onerror(e) {
