@@ -780,6 +780,7 @@
             this.id = -1;
             this.ping.stop();
             this.state.stop();
+            this.operator.disconnect();
             this.con.close();
             this.ping = null;
             this.con = null;
