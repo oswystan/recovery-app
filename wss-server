@@ -35,7 +35,16 @@ logi("listen on", SERVER_PORT);
 
 let initError = [0];
 let joinError = [0];
+let publishError = [1,1,0,2,4,0,2,3,0,9,0,8,0,2,3,0,5];
 let WSID = 1;
+
+function getError(errors) {
+    let error = errors.length == 0 ? 0 : errors[0];
+    if (errors.length > 0 ) {
+        errors.splice(0, 1);
+    }
+    return error;
+}
 
 app.ws('/app/v1.0.0', (ws, req)=>{
     ws.id = WSID++;
@@ -58,10 +67,7 @@ app.ws('/app/v1.0.0', (ws, req)=>{
     }
 
     function handleInit(msg) {
-        let error = initError.length == 0 ? 0 : initError[0];
-        if (initError.length > 0 ) {
-            initError.splice(0, 1);
-        }
+        let error = getError(initError);
         logd("error: ", error);
         let resp = {
             command: "init",
@@ -73,10 +79,7 @@ app.ws('/app/v1.0.0', (ws, req)=>{
         ws.send(JSON.stringify(resp));
     }
     function handleJoin(msg) {
-        let error = joinError.length == 0 ? 0 : joinError[0];
-        if (joinError.length > 0 ) {
-            joinError.splice(0, 1);
-        }
+        let error = getError(joinError);
         logd("error: ", error);
         let resp = {
             command: "join",
@@ -92,9 +95,11 @@ app.ws('/app/v1.0.0', (ws, req)=>{
         ws.send(JSON.stringify(resp));
     }
     function handlePublish(msg) {
+        let error = getError(publishError);
+        logd("error: ", error);
         let resp = {
             command: "publish",
-            error: 0,
+            error: error,
             data : {
                 sid: msg.sid,
                 sdp: "answer sdp"

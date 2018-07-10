@@ -5,8 +5,15 @@
     const loge = (...args)=>console.error("E|"+new Date().toISOString(), ...args);
 
 
-    function randomID() {
+    function randomU32() {
         return Math.floor(Math.random()*4294967296);
+    }
+    function randomU16() {
+        return Math.floor(Math.random()*65536);
+    }
+    const randomID = randomU32;
+    function streamExisted(streams, stream) {
+        return streams.findIndex((e)=>e.equal(stream)) !== -1;
     }
 
     class Emitter {
@@ -110,9 +117,9 @@
         }
         reset() {
             this.connectTimeoutMS  = 5000;
-            this.retryTimeoutMS    = this.randomMS();
             this.maxRetryTimeoutMS = 10000;
             this.incrementMS       = 1000;
+            this.retryTimeoutMS    = this.randomMS();
         }
     };
 
@@ -260,37 +267,98 @@
         }
     };
 
-    const CREATED   = 0;
-    const ERROR     = 1;
-    const COMPLETED = 2;
-    const CLOSED    = 3;
+    const CREATED    = 0;
+    const ERROR      = 1;
+    const CONNECTING = 2;
+    const COMPLETED  = 3;
+    const CLOSED     = 4;
 
-    const LOCAL     = 0;
-    const REMOTE    = 1;
+    const LOCAL      = 0;
+    const REMOTE     = 1;
 
-    const CMD_PUB   = 1;
-    const CMD_SUB   = 2;
-    const CMD_UNPUB = 3;
-    const CMD_UNSUB = 4;
+    const CMD_PUB    = 1;
+    const CMD_SUB    = 2;
+    const CMD_UNPUB  = 3;
+    const CMD_UNSUB  = 4;
+
+    class Stream {
+        constructor(id, type = LOCAL) {
+            this.type      = type;
+            this.id        = id;
+            this.status    = CREATED;
+            this.timer     = new RetryTimer();
+            this.nextTryTS = 0;
+        }
+        equal(stream) {
+            return (stream instanceof Stream) &&
+                stream.type === this.type &&
+                stream.id === this.id;
+        }
+        disconnect() {
+            this.status = ERROR;
+            this.timer.reset();
+            this.nextTryTS = 0;
+        }
+    };
+    class StreamCommand {
+        constructor(type, stream, resolve, reject) {
+            this.type    = type;
+            this.stream  = stream;
+            this.resolve = resolve;
+            this.reject  = reject;
+        }
+    };
+    class StreamPicker {
+        constructor(app) {
+            this.app = app;
+        }
+        pick() {
+            let stream = null;
+            let now = Date.now();
+            for(let one of this.app.lstreams) {
+                if (one.status !== ERROR) continue;
+                if (!stream) {
+                    stream = one;
+                }
+                if ((one.nextTryTS-now) < (stream.nextTryTS-now)) {
+                    stream = one;
+                }
+            }
+            for(let one of this.app.rstreams) {
+                if (one.status !== ERROR) continue;
+                if (!stream) {
+                    stream = one;
+                }
+                if ((one.nextTryTS-now) < (stream.nextTryTS-now)) {
+                    stream = one;
+                }
+            }
+
+            return stream;
+        }
+    }
 
     class StreamOperator {
         constructor(app) {
             this.app = app;
             this.working = null;
-            this.timer = new RetryTimer();
+            this.repairing = null;
             this.timerID = 0;
+            this.picker = new StreamPicker(app);
         }
         trigger() {
-            if (this.working) {
+            if (this.working || this.repairing) {
+                logd("already in progress...");
                 return;
             }
             let app = this.app;
-            if (app.streamCmds.length === 0) {
-                return;
+            if (app.streamCmds.length !== 0) {
+                this.working = app.streamCmds[0];
+                app.streamCmds.splice(0, 1);
+                this._process_();
+            } else {
+                this._repair_();
             }
-            this.working = app.streamCmds[0];
-            app.streamCmds.splice(0, 1);
-            this._doWorking_();
         }
         stop() {
             if (this.timerID) {
@@ -298,12 +366,30 @@
             }
             this.timerID = 0;
             let app = this.app;
-            app.streamCmds.splice(0, 0, this.working);
+            if (this.working) {
+                app.streamCmds.splice(0, 0, this.working);
+            }
             this.working = null;
+            this.repairing = null;
+            app._clearStreamHandler_();
         }
 
-        _doWorking_() {
+        disconnect() {
+            this.stop();
+            for (let one of this.app.lstreams) {
+                one.disconnect();
+            }
+            for (let one of this.app.rstreams) {
+                one.disconnect();
+            }
+        }
+
+        _process_() {
+            clearTimeout(this.timerID);
+            this.timerID = 0;
+
             let cmd = this.working;
+            logi("process stream:", cmd.stream.id);
             switch(cmd.type) {
                 case CMD_PUB:   { this._doPublish_(); break; }
                 case CMD_SUB:   { this._doSubscribe_(); break; }
@@ -312,51 +398,86 @@
                 default:
                 {
                     loge("invalid command", cmd.type);
+                    this.working = null;
                     this.trigger();
                     break;
                 }
             }
         }
+        _repair_() {
+            let stream = this.picker.pick();
+            if (!stream) {
+                logd("NO stream needs to be repair");
+                return;
+            }
+            let delta = stream.nextTryTS - Date.now();
+            if (delta <= 0) {
+                this._repairStream_(stream);
+            } else {
+                this.timerID = setTimeout(this._repair_.bind(this), delta);
+            }
+        }
+
+        _repairStream_(stream) {
+            this.repairing = stream;
+            if (stream.type === LOCAL) {
+                this._repairPublishStream_(stream);
+            } else {
+                this._repairSubscribeStream_(stream);
+            }
+        }
+        _repairPublishStream_(stream) {
+            let app = this.app;
+            let operator = this;
+
+            function succ(resp) {
+                logd("repair succ", stream.id);
+                stream.status = COMPLETED;
+                operator.repairing = null;
+                operator.trigger();
+            }
+            function fail(resp) {
+                logd("fail to repair", stream.id);
+                stream.status = ERROR;
+                stream.nextTryTS = Date.now() + stream.timer.retryMS();
+                operator.repairing = null;
+                operator.trigger();
+            }
+            app._doPublish_(stream, succ, fail);
+        }
+        _repairSubscribeStream_(stream) {}
 
         _doPublish_() {
             let app = this.app;
             let cmd = this.working;
             let operator = this;
+            if (streamExisted(app.lstreams, cmd.stream)) {
+                cmd.reject && reject();
+                this.working = null;
+                this.trigger();
+                return;
+            }
             function succ(resp) {
                 logi("publish succ", cmd.stream.id);
                 app.emitter.aemit("stream-published", cmd.stream);
+                cmd.stream.status = COMPLETED;
+                operator.working = null;
+                app.lstreams.push(cmd.stream);
+                operator.trigger();
             }
             function fail(resp) {
                 loge("fail to publish", cmd.stream.id);
-                operator.timerID = setTimeout(operator._doPublish_.bind(operator), operator.timer.retryMS());
+                cmd.stream.status = ERROR;
+                cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.retryMS();
+                operator.working = null;
+                app.lstreams.push(cmd.stream);
+                operator.trigger();
             }
-            app._doPublish_(cmd.stream, succ, cmd.reject);
+            app._doPublish_(cmd.stream, succ, fail);
         }
         _doUnPublish_() {}
         _doSubscribe_() {}
         _doUnSubscribe_() {}
-    };
-
-
-    class Stream {
-        constructor(id, type = LOCAL) {
-            this.type   = type;
-            this.id     = id;
-            this.status = CREATED;
-        }
-        equal(stream) {
-            return (stream instanceof Stream) &&
-                stream.type === this.type &&
-                stream.id === this.id;
-        }
-    };
-    class StreamCommand {
-        constructor(type, stream, resolve, reject) {
-            this.type = type;
-            this.stream = stream;
-            this.resolve = resolve;
-            this.reject = reject;
-        }
     };
 
     class StateBase {
@@ -530,6 +651,7 @@
             app.state = new StateNormal(app);
             clearTimeout(this.timerID);
             this.timerID = 0;
+            app.operator.trigger();
         }
     };
 
@@ -540,8 +662,8 @@
             this.url           = url;
             this.id            = -1;
             this.conf          = null;
-            this.lstream       = [];
-            this.rstream       = [];
+            this.lstreams      = [];
+            this.rstreams      = [];
             this.startCallback = null;
             this.emitter       = new Emitter();
             this.state         = new StateNormal(this);
@@ -614,6 +736,7 @@
             logw("===> server disconnected");
             this.ping.stop();
             this.state.stop();
+            this.operator.disconnect();
             this.state = new StateRecovery(this);
             this.con.connect(this.url);
         }
@@ -629,6 +752,17 @@
             this.con.close();
             this.state = new StateRecovery(this);
             this.con.connect(this.url);
+        }
+
+        _clearStreamHandler_(msg) {
+            if (msg) {
+                this.emitter.off(msg);
+            } else {
+                this.emitter.off("publish");
+                this.emitter.off("subscribe");
+                this.emitter.off("unpublish");
+                this.emitter.off("unsubscribe");
+            }
         }
 
         _respHandler_(resolve, reject, resp) {
@@ -664,7 +798,7 @@
             this.con.send(JSON.stringify(req));
         }
         _doPublish_(stream, resolve, reject) {
-            let req = {command: "publish", stream: stream};
+            let req = {command: "publish", stream: {id: stream.id, type: stream.type}};
             this.emitter.off("publish");
             this.emitter.once("publish", this._respHandler_.bind(this, resolve, reject));
             this.con.send(JSON.stringify(req));
@@ -704,11 +838,13 @@
 
         function publish() {
             app.publish(new Stream(randomID(), LOCAL));
+            app.publish(new Stream(randomID(), LOCAL));
         }
     }
     function stopApp() {
         app.close();
     }
+
 
     document.getElementById('start').onclick = startApp;
     document.getElementById('stop').onclick = stopApp;
