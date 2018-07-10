@@ -97,6 +97,11 @@
         };
     };
 
+    function clearTimer(timerID) {
+        timerID > 0 && clearTimeout(timerID);
+        return 0;
+    }
+
     class RandomTimer {
         constructor() {
             this.reset();
@@ -118,51 +123,18 @@
         }
     };
 
-    function clearTimer(timerID) {
-        if (timerID > 0) {
-            clearTimeout(timerID);
-        }
-        return 0;
-    }
-
-    class RetryTimer {
-        constructor() {
-            this.reset();
-        }
-
-        connectMS() {
-            return this.connectTimeoutMS;
-        }
-        retryMS() {
-            let ret = this.retryTimeoutMS;
-            this.retryTimeoutMS += this.randomMS();
-            if (this.retryTimeoutMS >= this.maxRetryTimeoutMS) {
-                this.retryTimeoutMS = this.maxRetryTimeoutMS;
-            }
-            return ret;
-        }
-        randomMS() {
-            return Math.ceil(Math.random()*1000) + this.incrementMS;
-        }
-        reset() {
-            this.connectTimeoutMS  = 5000;
-            this.maxRetryTimeoutMS = 10000;
-            this.incrementMS       = 1000;
-            this.retryTimeoutMS    = this.randomMS();
-        }
-    };
-
     class StableWebSocket {
         constructor() {
-            this.url            = null;
-            this.onmessage      = null;
-            this.onopen         = null;
-            this.onclose        = null;
-            this.ws             = null;
-            this.connectTimerID = 0;
-            this.retryTimerID   = 0;
-            this.timer          = new RetryTimer();
-            this.lastConnectTS  = 0;
+            this.url                = null;
+            this.onmessage          = null;
+            this.onopen             = null;
+            this.onclose            = null;
+            this.ws                 = null;
+            this.connectTimerID     = 0;
+            this.retryTimerID       = 0;
+            this.timer              = new RandomTimer();
+            this.lastConnectTS      = 0;
+            this.kConnectIntervalMS = 5000;
         }
         send(data) {
             this.ws && this.ws.send(data);
@@ -184,16 +156,16 @@
 
             // incase of connect the wrong url: connect will be success, but server will
             // disconnect socket immediately after that.
-            if (Date.now() - this.lastConnectTS > this.timer.retryTimeoutMS) {
+            if (Date.now() - this.lastConnectTS > this.kConnectIntervalMS) {
                 logd('direct connect');
-                this._connectWebSocket();
+                this._connect();
             } else {
                 logd('random connect');
-                this.connectTimerID = setTimeout(this._connectWebSocket.bind(this), this.timer.randomMS());
+                this.connectTimerID = setTimeout(this._connect.bind(this), this.timer.rand());
             }
         }
 
-        _connectWebSocket() {
+        _connect() {
             try {
                 this.lastConnectTS = Date.now();
                 let ws     = new WebSocket(url);
@@ -204,7 +176,7 @@
                 this.connectTimerID = setTimeout(()=>{
                     loge("connect", url, "timeout!");
                     ws.close();
-                }, this.timer.connectMS());
+                }, this.kConnectIntervalMS);
             } catch (e) {
                 loge("ERROR:", e);
                 this.ws = null;
@@ -214,10 +186,10 @@
 
         _retry() {
             let con = this;
-            let ms = con.timer.retryMS();
+            let ms = con.timer.next();
             logd("retry after", ms, "ms");
             con.retryTimerID = setTimeout(()=>{
-                con._connectWebSocket();
+                con._connect();
             }, ms);
         }
         _onopen() {
@@ -244,46 +216,42 @@
 
     class PingService {
         constructor(intervalMS, timeoutHits) {
-            this.pingTimer     = 0;
-            this.interval      = intervalMS;
-            this.timeoutHits   = timeoutHits;
-            this.pingHits      = 0;
-            this.con           = null;
+            this.timerID     = 0;
+            this.interval    = intervalMS;
+            this.timeoutHits = timeoutHits;
+            this.hits        = 0;
+            this.con         = null;
+            this.ontimeout   = null;
         }
 
         start(con, callback) {
             this.con = con;
-            this.timeoutCallback = callback;
-            this.pingHits = 0;
+            this.hits = 0;
+            this.ontimeout = callback;
             this._ping();
         }
         stop() {
             logi("=> stop ping");
-            if (this.pingTimer > 0) {
-                clearTimeout(this.pingTimer);
-            }
-            this.pingTimer = 0;
+            this.timerID = clearTimer(this.timerID);
             this.con = null;
         }
         pong() {
-            this.pingHits = 0;
+            this.hits = 0;
         }
         _ping() {
             if (!this.con) {
                 return;
             }
 
-            if (this.pingHits >= this.timeoutHits) {
-                if (this.timeoutCallback) {
-                    logw("ping time out");
-                    this.timeoutCallback();
-                }
-                this.pingTimer = 0;
+            if (this.hits >= this.timeoutHits) {
+                logw("*** *** PING TIMEOUT *** ***");
+                this.ontimeout && this.ontimeout();
+                this.timerID = 0;
             } else {
                 let req = {command: "ping"};
                 this.con.send(JSON.stringify(req));
-                this.pingTimer = setTimeout(this._ping.bind(this), this.interval);
-                this.pingHits++;
+                this.timerID = setTimeout(this._ping.bind(this), this.interval);
+                this.hits++;
             }
         }
     };
@@ -307,7 +275,7 @@
             this.type      = type;
             this.id        = id;
             this.status    = CREATED;
-            this.timer     = new RetryTimer();
+            this.timer     = new RandomTimer();
             this.nextTryTS = 0;
         }
         equal(stream) {
@@ -382,10 +350,7 @@
             }
         }
         stop() {
-            if (this.timerID) {
-                clearTimeout(this.timerID);
-            }
-            this.timerID = 0;
+            this.timerID = clearTimer(this.timerID);
             let app = this.app;
             if (this.working) {
                 app.streamCmds.splice(0, 0, this.working);
@@ -406,8 +371,7 @@
         }
 
         _process_() {
-            clearTimeout(this.timerID);
-            this.timerID = 0;
+            this.timerID = clearTimer(this.timerID);
 
             let cmd = this.working;
             logi("process stream:", cmd.stream.id);
@@ -464,7 +428,7 @@
             }
             function fail(resp) {
                 logd("fail to repair", stream.id);
-                stream.nextTryTS = Date.now() + stream.timer.retryMS();
+                stream.nextTryTS = Date.now() + stream.timer.next();
                 end(ERROR);
             }
             app._doPublish_(stream, succ, fail);
@@ -486,7 +450,7 @@
             }
             function fail(resp) {
                 logd("fail to repair", stream.id);
-                stream.nextTryTS = Date.now() + stream.timer.retryMS();
+                stream.nextTryTS = Date.now() + stream.timer.next();
                 end(ERROR);
             }
             app._doSubscribe_(stream, succ, fail);
@@ -516,7 +480,7 @@
             }
             function fail(resp) {
                 loge("fail to publish", cmd.stream.id);
-                cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.retryMS();
+                cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.next();
                 end(ERROR);
             }
             app._doPublish_(cmd.stream, succ, fail);
@@ -569,7 +533,7 @@
             }
             function fail(resp) {
                 loge("fail to subscribe", cmd.stream.id);
-                cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.retryMS();
+                cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.next();
                 end(ERROR);
             }
             app._doSubscribe_(cmd.stream, succ, fail);
@@ -691,7 +655,7 @@
     class StateRecovery extends StateBase {
         constructor(app) {
             super(app);
-            this.timer = new RetryTimer();
+            this.timer = new RandomTimer();
             this.timerID = 0;
         }
 
@@ -707,8 +671,7 @@
         }
         stop() {
             logd("recover stop");
-            clearTimeout(this.timerID);
-            this.timerID = 0;
+            this.timerID = clearTimer(this.timerID);
         }
 
         _recoverInit_() {
@@ -725,7 +688,7 @@
             }
             function fail(resp) {
                 loge("fail to do init: ", resp.error);
-                state.timerID = setTimeout(state._recoverInit_.bind(state), state.timer.retryMS());
+                state.timerID = setTimeout(state._recoverInit_.bind(state), state.timer.next());
             }
             app._doInit_(succ, fail);
         }
@@ -738,7 +701,7 @@
             }
             function fail(resp) {
                 loge("fail to do join: ", resp.error);
-                state.timerID = setTimeout(state._recoverJoin_.bind(state), state.timer.retryMS());
+                state.timerID = setTimeout(state._recoverJoin_.bind(state), state.timer.next());
             }
             app._doJoin_(app.conf, succ, fail);
         }
@@ -746,8 +709,7 @@
             logi("recover exit");
             let app = this.app;
             app.state = new StateNormal(app);
-            clearTimeout(this.timerID);
-            this.timerID = 0;
+            this.timerID = clearTimer(this.timerID);
             app.operator.trigger();
         }
     };
