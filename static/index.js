@@ -475,7 +475,28 @@
             }
             app._doPublish_(cmd.stream, succ, fail);
         }
-        _doUnPublish_() {}
+        _doUnPublish_() {
+            let app = this.app;
+            let cmd = this.working;
+            let operator = this;
+            if (!streamExisted(app.lstreams, cmd.stream)) {
+                loge("NO such stream:", cmd.stream.id);
+                cmd.reject && reject();
+                this.working = null;
+                this.trigger();
+                return;
+            }
+
+            function done(resp) {
+                if (resp.error) {
+                    logw("unpublish failed", resp.error, "of stream", cmd.stream.id);
+                }
+                operator.working = null;
+                operator.trigger();
+            }
+            app._removeStream_(cmd.stream);
+            app._doUnPublish_(cmd.stream, done, done);
+        }
         _doSubscribe_() {}
         _doUnSubscribe_() {}
     };
@@ -754,6 +775,20 @@
             this.con.connect(this.url);
         }
 
+        _removeStream_(stream) {
+            let streams = null;
+            if (stream.type === LOCAL) {
+                streams = this.lstreams;
+            } else {
+                streams = this.rstreams;
+            }
+
+            let idx = streams.findIndex((e)=>e.equal(stream));
+            if (idx>=0) {
+                streams.splice(idx, 1);
+            }
+        }
+
         _clearStreamHandler_(msg) {
             if (msg) {
                 this.emitter.off(msg);
@@ -810,7 +845,7 @@
             this.con.send(JSON.stringify(req));
         }
         _doUnPublish_(stream, resolve, reject) {
-            let req = {command: "unpublish", stream: stream};
+            let req = {command: "unpublish", stream: {id: stream.id, type: stream.type}};
             this.emitter.off("unpublish");
             this.emitter.once("unpublish", this._respHandler_.bind(this, resolve, reject));
             this.con.send(JSON.stringify(req));
@@ -838,7 +873,9 @@
 
         function publish() {
             app.publish(new Stream(randomID(), LOCAL));
-            app.publish(new Stream(randomID(), LOCAL));
+            let s2 = new Stream(randomID(), LOCAL);
+            app.publish(s2);
+            app.unpublish(s2);
         }
     }
     function stopApp() {
