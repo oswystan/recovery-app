@@ -430,22 +430,46 @@
             let app = this.app;
             let operator = this;
 
-            function succ(resp) {
-                logd("repair succ", stream.id);
-                stream.status = COMPLETED;
+            function end(status) {
+                stream.status = status;
                 operator.repairing = null;
                 operator.trigger();
+            }
+
+            function succ(resp) {
+                logd("repair succ", stream.id);
+                stream.timer.reset();
+                end(COMPLETED);
             }
             function fail(resp) {
                 logd("fail to repair", stream.id);
-                stream.status = ERROR;
                 stream.nextTryTS = Date.now() + stream.timer.retryMS();
-                operator.repairing = null;
-                operator.trigger();
+                end(ERROR);
             }
             app._doPublish_(stream, succ, fail);
         }
-        _repairSubscribeStream_(stream) {}
+        _repairSubscribeStream_(stream) {
+            let app = this.app;
+            let operator = this;
+
+            function end(status) {
+                stream.status = status;
+                operator.repairing = null;
+                operator.trigger();
+            }
+
+            function succ(resp) {
+                logd("repair succ", stream.id);
+                stream.timer.reset();
+                end(COMPLETED);
+            }
+            function fail(resp) {
+                logd("fail to repair", stream.id);
+                stream.nextTryTS = Date.now() + stream.timer.retryMS();
+                end(ERROR);
+            }
+            app._doSubscribe_(stream, succ, fail);
+        }
 
         _doPublish_() {
             let app = this.app;
@@ -457,21 +481,22 @@
                 this.trigger();
                 return;
             }
-            function succ(resp) {
-                logi("publish succ", cmd.stream.id);
-                app.emitter.aemit("stream-published", cmd.stream);
-                cmd.stream.status = COMPLETED;
+            function end(status) {
+                cmd.stream.status = status;
                 operator.working = null;
                 app.lstreams.push(cmd.stream);
                 operator.trigger();
             }
+            function succ(resp) {
+                logi("publish succ", cmd.stream.id);
+                app.emitter.aemit("stream-published", cmd.stream);
+                cmd.stream.timer.reset();
+                end(COMPLETED);
+            }
             function fail(resp) {
                 loge("fail to publish", cmd.stream.id);
-                cmd.stream.status = ERROR;
                 cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.retryMS();
-                operator.working = null;
-                app.lstreams.push(cmd.stream);
-                operator.trigger();
+                end(ERROR);
             }
             app._doPublish_(cmd.stream, succ, fail);
         }
@@ -490,6 +515,8 @@
             function done(resp) {
                 if (resp.error) {
                     logw("unpublish failed", resp.error, "of stream", cmd.stream.id);
+                } else {
+                    logi("unpublish stream", cmd.stream.id, "succ");
                 }
                 operator.working = null;
                 operator.trigger();
@@ -497,7 +524,35 @@
             app._removeStream_(cmd.stream);
             app._doUnPublish_(cmd.stream, done, done);
         }
-        _doSubscribe_() {}
+        _doSubscribe_() {
+            let app = this.app;
+            let cmd = this.working;
+            let operator = this;
+            if (streamExisted(app.rstreams, cmd.stream)) {
+                cmd.reject && reject();
+                this.working = null;
+                this.trigger();
+                return;
+            }
+            function end(status) {
+                cmd.stream.status = status;
+                operator.working = null;
+                app.rstreams.push(cmd.stream);
+                operator.trigger();
+            }
+            function succ(resp) {
+                logi("subscribe succ", cmd.stream.id);
+                app.emitter.aemit("stream-subscribed", cmd.stream);
+                cmd.stream.timer.reset();
+                end(COMPLETED);
+            }
+            function fail(resp) {
+                loge("fail to subscribe", cmd.stream.id);
+                cmd.stream.nextTryTS = Date.now() + cmd.stream.timer.retryMS();
+                end(ERROR);
+            }
+            app._doSubscribe_(cmd.stream, succ, fail);
+        }
         _doUnSubscribe_() {}
     };
 
@@ -770,6 +825,7 @@
         _pingTimeout_() {
             this.ping.stop();
             this.state.stop();
+            this.operator.disconnect();
             this.con.close();
             this.state = new StateRecovery(this);
             this.con.connect(this.url);
@@ -839,7 +895,7 @@
             this.con.send(JSON.stringify(req));
         }
         _doSubscribe_(stream, resolve, reject) {
-            let req = {command: "subscribe", stream: stream};
+            let req = {command: "subscribe", stream: {id: stream.id, type: stream.type}};
             this.emitter.off("subscribe");
             this.emitter.once("subscribe", this._respHandler_.bind(this, resolve, reject));
             this.con.send(JSON.stringify(req));
@@ -851,7 +907,7 @@
             this.con.send(JSON.stringify(req));
         }
         _doUnSubscribe_(stream, resolve, reject) {
-            let req = {command: "unsubscribe", stream: stream};
+            let req = {command: "unsubscribe", stream: {id: stream.id, type: stream.type}};
             this.emitter.off("unsubscribe");
             this.emitter.once("unsubscribe", this._respHandler_.bind(this, resolve, reject));
             this.con.send(JSON.stringify(req));
@@ -860,7 +916,6 @@
 
     // let url = "ws://10.2.20.98:8090/app/v1.0.0";
     let url = "wss://10.33.11.31:8443/app/v1.0.0";
-
 
     let app = null;
     function startApp() {
@@ -873,9 +928,18 @@
 
         function publish() {
             app.publish(new Stream(randomID(), LOCAL));
+            app.publish(new Stream(randomID(), LOCAL));
+            app.publish(new Stream(randomID(), LOCAL));
+            app.publish(new Stream(randomID(), LOCAL));
+            app.publish(new Stream(randomID(), LOCAL));
             let s2 = new Stream(randomID(), LOCAL);
             app.publish(s2);
             app.unpublish(s2);
+            app.subscribe(new Stream(randomID(), REMOTE));
+            app.subscribe(new Stream(randomID(), REMOTE));
+            app.subscribe(new Stream(randomID(), REMOTE));
+            app.subscribe(new Stream(randomID(), REMOTE));
+            app.publish(new Stream(randomID(), LOCAL));
         }
     }
     function stopApp() {
